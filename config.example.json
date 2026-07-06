@@ -1,0 +1,32 @@
+{
+  "pricing": {
+    "claude-sonnet-4": {
+      "input": 3.0,
+      "output": 15.0,
+      "cache_write": 3.75,
+      "cache_read": 0.3
+    },
+    "claude-opus-4": {
+      "input": 15.0,
+      "output": 75.0,
+      "cache_write": 18.75,
+      "cache_read": 1.5
+    },
+    "claude-haiku-4": {
+      "input": 0.8,
+      "output": 4.0,
+      "cache_write": 1.0,
+      "cache_read": 0.08
+    }
+  },
+  "usd_to_cny": 7.25,
+  "cost_warning_threshold_cny": 50.0,
+  "notification": {
+    "enabled": false,
+    "server_chan_sckey": ""
+  },
+  "tailer": {
+    "use_polling": false,
+    "polling_interval_ms": 1000
+  }
+}

@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CC Cockpit - Claude Code 监控驾驶舱</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --border: #30363d;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --text-muted: #484f58;
+      --accent: #58a6ff;
+      --accent-dim: #1f6feb;
+      --success: #3fb950;
+      --warning: #d29922;
+      --danger: #f85149;
+      --user-bg: #1c2333;
+      --assistant-bg: #161b22;
+      --tool-bg: #1a1e24;
+    }
+
+    body {
+      font-family: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', monospace;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      height: 100vh;
+      overflow: hidden;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    /* Layout */
+    .app {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      grid-template-rows: 48px 1fr;
+      height: 100vh;
+    }
+
+    /* Top bar */
+    .top-bar {
+      grid-column: 1 / -1;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      gap: 24px;
+    }
+
+    .top-bar .logo {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--accent);
+      white-space: nowrap;
+    }
+
+    .cost-bar {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .cost-bar .token-group {
+      display: flex;
+      gap: 4px;
+    }
+
+    .cost-bar .token-label {
+      color: var(--text-muted);
+    }
+
+    .cost-bar .token-value {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    .cost-bar .cost-total {
+      color: var(--success);
+      font-weight: 700;
+    }
+
+    .cost-bar .cost-total.warning {
+      color: var(--warning);
+    }
+
+    .connection-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .connection-status .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+    }
+
+    .connection-status .dot.connected {
+      background: var(--success);
+    }
+
+    /* Session list */
+    .session-list {
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+    }
+
+    .session-list-header {
+      padding: 12px 16px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--bg-secondary);
+      z-index: 1;
+    }
+
+    .session-item {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .session-item:hover {
+      background: var(--bg-tertiary);
+    }
+
+    .session-item.active {
+      background: var(--accent-dim);
+      border-left: 3px solid var(--accent);
+    }
+
+    .session-item .session-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+
+    .session-item .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .session-item .status-dot.running {
+      background: var(--success);
+      box-shadow: 0 0 6px var(--success);
+    }
+
+    .session-item .status-dot.idle {
+      background: var(--text-muted);
+    }
+
+    .session-item .project-name {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .session-item .session-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .session-item .summary {
+      font-size: 11px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 4px;
+    }
+
+    /* Message flow */
+    .message-flow {
+      overflow-y: auto;
+      padding: 16px;
+      scroll-behavior: smooth;
+    }
+
+    .message-flow.paused::after {
+      content: '▼ 已暂停自动滚动（点击恢复）';
+      position: sticky;
+      bottom: 0;
+      display: block;
+      text-align: center;
+      padding: 8px;
+      background: var(--accent-dim);
+      color: var(--text-primary);
+      font-size: 11px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+
+    .message-card {
+      margin-bottom: 12px;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    .message-card.user {
+      background: var(--user-bg);
+      border-left: 3px solid var(--accent);
+    }
+
+    .message-card.assistant {
+      background: var(--assistant-bg);
+      border-left: 3px solid var(--success);
+    }
+
+    .message-card.system {
+      background: var(--bg-tertiary);
+      border-left: 3px solid var(--warning);
+    }
+
+    .message-card .message-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .message-card .message-role {
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .message-card.user .message-role { color: var(--accent); }
+    .message-card.assistant .message-role { color: var(--success); }
+    .message-card.system .message-role { color: var(--warning); }
+
+    .message-card .message-time {
+      margin-left: auto;
+      font-size: 10px;
+    }
+
+    .message-card .message-model {
+      font-size: 10px;
+      color: var(--text-muted);
+      background: var(--bg-tertiary);
+      padding: 1px 6px;
+      border-radius: 3px;
+    }
+
+    .message-card .message-body {
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .message-card .message-body p {
+      margin-bottom: 8px;
+    }
+
+    .message-card .message-body p:last-child {
+      margin-bottom: 0;
+    }
+
+    /* Tool use card */
+    .tool-card {
+      background: var(--tool-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      margin: 8px 0;
+      overflow: hidden;
+    }
+
+    .tool-card .tool-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      background: var(--bg-tertiary);
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .tool-card .tool-header:hover {
+      background: var(--border);
+    }
+
+    .tool-card .tool-name {
+      font-weight: 700;
+      font-size: 11px;
+      color: var(--warning);
+    }
+
+    .tool-card .tool-input-preview {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .tool-card .tool-toggle {
+      margin-left: auto;
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .tool-card .tool-body {
+      padding: 8px 10px;
+      font-size: 11px;
+      display: none;
+      border-top: 1px solid var(--border);
+    }
+
+    .tool-card.expanded .tool-body {
+      display: block;
+    }
+
+    .tool-card .tool-result {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+
+    /* Sidechain group */
+    .sidechain-group {
+      background: var(--bg-tertiary);
+      border: 1px dashed var(--border);
+      border-radius: 6px;
+      margin: 8px 0;
+      padding: 8px 12px;
+    }
+
+    .sidechain-group .sidechain-header {
+      font-size: 11px;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+
+    .sidechain-group .sidechain-header:hover {
+      color: var(--text-primary);
+    }
+
+    .sidechain-group .sidechain-messages {
+      display: none;
+      margin-top: 8px;
+    }
+
+    .sidechain-group.expanded .sidechain-messages {
+      display: block;
+    }
+
+    /* Empty state */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--text-muted);
+      text-align: center;
+      gap: 12px;
+    }
+
+    .empty-state .icon {
+      font-size: 48px;
+      opacity: 0.3;
+    }
+
+    .empty-state .title {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .empty-state .desc {
+      font-size: 12px;
+      max-width: 300px;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+
+    /* Animations */
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .running-indicator {
+      animation: pulse 2s infinite;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Top bar -->
+    <div class="top-bar">
+      <div class="logo">⚡ CC Cockpit</div>
+      <div class="cost-bar">
+        <div class="token-group">
+          <span class="token-label">IN:</span>
+          <span class="token-value" id="cost-input">0</span>
+        </div>
+        <div class="token-group">
+          <span class="token-label">OUT:</span>
+          <span class="token-value" id="cost-output">0</span>
+        </div>
+        <div class="token-group">
+          <span class="token-label">CACHE-R:</span>
+          <span class="token-value" id="cost-cache-read">0</span>
+        </div>
+        <div class="token-group">
+          <span class="token-label">CACHE-W:</span>
+          <span class="token-value" id="cost-cache-write">0</span>
+        </div>
+        <div class="token-group">
+          <span class="token-label">COST:</span>
+          <span class="cost-total" id="cost-total">$0.00</span>
+        </div>
+      </div>
+      <div class="connection-status">
+        <span class="dot" id="ws-dot"></span>
+        <span id="ws-status">断开</span>
+      </div>
+    </div>
+
+    <!-- Session list -->
+    <div class="session-list">
+      <div class="session-list-header">会话列表</div>
+      <div id="session-items"></div>
+    </div>
+
+    <!-- Message flow -->
+    <div class="message-flow" id="message-flow">
+      <div class="empty-state" id="empty-state">
+        <div class="icon">📡</div>
+        <div class="title">等待会话...</div>
+        <div class="desc">启动 Claude Code 执行任务后，消息流将实时显示在这里</div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

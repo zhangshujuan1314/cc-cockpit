@@ -1,0 +1,20 @@
+{
+  "name": "cc-cockpit",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Claude Code 实时监控驾驶舱",
+  "main": "shell/main.js",
+  "scripts": {
+    "web": "node core/server.js",
+    "start": "electron shell/main.js",
+    "install-shell": "npm install electron --legacy-peer-deps"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "chokidar": "^4.0.0"
+  },
+  "optionalDependencies": {
+    "electron": "^33.0.0"
+  },
+  "license": "MIT"
+}
