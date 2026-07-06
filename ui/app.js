@@ -1,502 +1,355 @@
 /**
- * CC Cockpit v0.1.0 — 重新设计的 UI
+ * CC Cockpit — Grafana-style monitoring dashboard
  */
 
-const state = {
-  ws: null,
-  sessions: new Map(),
-  activeSessionId: null,
-  files: [],
-  config: { pricing: {}, usd_to_cny: 7.25, cost_warning_threshold_cny: 50 },
-  autoScroll: true,
-  reconnectTimer: null,
-  reconnectAttempts: 0,
+const S = {
+  ws: null, sessions: new Map(), activeSid: null, files: [],
+  cfg: { pricing: {}, usd_to_cny: 7.25, cost_warning_threshold_cny: 50 },
+  autoScroll: true, rcTimer: null, rcCount: 0,
 };
 
-const dom = {
-  sessionItems: document.getElementById('session-items'),
-  sessionCount: document.getElementById('session-count'),
-  messageFlow: document.getElementById('message-flow'),
-  fileItems: document.getElementById('file-items'),
-  fileCount: document.getElementById('file-count'),
-  wsDot: document.getElementById('ws-dot'),
-  wsStatus: document.getElementById('ws-status'),
-  costInput: document.getElementById('cost-input'),
-  costOutput: document.getElementById('cost-output'),
-  costCacheRead: document.getElementById('cost-cache-read'),
-  costTotal: document.getElementById('cost-total'),
-  costCard: document.getElementById('cost-card'),
-  hooksStatus: document.getElementById('hooks-status'),
+const $ = id => document.getElementById(id);
+const D = {
+  sList: $('s-list'), sCnt: $('s-cnt'),
+  mFlow: $('m-flow'), mCnt: $('m-cnt'),
+  fList: $('f-list'), fCnt: $('f-cnt'),
+  mIn: $('m-in'), mOut: $('m-out'), mCache: $('m-cache'),
+  mCost: $('m-cost'), mCostCard: $('m-cost-card'),
+  wsRing: $('ws-ring'), wsTxt: $('ws-txt'),
+  hooksEl: $('hooks-el'),
 };
 
-// ═══════════ WebSocket ═══════════
+// ── WebSocket ──
 
-function connect() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  state.ws = new WebSocket(`${proto}//${location.host}`);
-  state.ws.onopen = () => { state.reconnectAttempts = 0; wsStatus(true); };
-  state.ws.onclose = () => { wsStatus(false); scheduleReconnect(); };
-  state.ws.onerror = () => {};
-  state.ws.onmessage = e => { try { handle(JSON.parse(e.data)); } catch {} };
+function wsConnect() {
+  const p = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  S.ws = new WebSocket(`${p}//${location.host}`);
+  S.ws.onopen = () => { S.rcCount = 0; wsOk(true); };
+  S.ws.onclose = () => { wsOk(false); wsRetry(); };
+  S.ws.onmessage = e => { try { route(JSON.parse(e.data)); } catch {} };
 }
 
-function scheduleReconnect() {
-  if (state.reconnectTimer) return;
-  const delay = Math.min(1000 * Math.pow(2, state.reconnectAttempts), 30000);
-  state.reconnectAttempts++;
-  state.reconnectTimer = setTimeout(() => { state.reconnectTimer = null; connect(); }, delay);
+function wsRetry() {
+  if (S.rcTimer) return;
+  S.rcTimer = setTimeout(() => { S.rcTimer = null; wsConnect(); }, Math.min(1000 * 2 ** S.rcCount++, 30000));
 }
 
-function wsStatus(ok) {
-  dom.wsDot.classList.toggle('connected', ok);
-  dom.wsStatus.textContent = ok ? '已连接' : '断开';
+function wsOk(ok) {
+  D.wsRing.classList.toggle('on', ok);
+  D.wsTxt.textContent = ok ? '已连接' : '断开';
 }
 
-// ═══════════ Message Router ═══════════
+// ── Router ──
 
-function handle(msg) {
-  switch (msg.type) {
-    case 'init': onInit(msg); break;
-    case 'session:created': onSessionCreated(msg); break;
-    case 'session:updated': onSessionUpdated(msg); break;
-    case 'message': onMessage(msg); break;
-    case 'messages': onMessagesBulk(msg); break;
-    case 'files': onFilesUpdate(msg.files); break;
-    case 'file:changed': onFileChanged(msg); break;
-    case 'file:diff': onFileDiff(msg); break;
-    case 'hook': console.log('[hook]', msg.event); break;
-  }
+function route(m) {
+  const h = {
+    'init': onInit, 'session:created': onNewSession, 'session:updated': onUpdSession,
+    'message': onMsg, 'messages': onBulk, 'files': f => { S.files = f || []; drawFiles(); },
+    'file:changed': onFileChg, 'file:diff': onFileDiff,
+  };
+  h[m.type]?.(m);
 }
 
-function onInit(msg) {
-  state.config = msg.config || state.config;
-  for (const s of msg.sessions) state.sessions.set(s.sessionId, { ...s, messages: [], sidechains: new Map() });
-  if (msg.files) onFilesUpdate(msg.files);
-  renderSessions();
-  if (msg.sessions.length > 0 && !state.activeSessionId) selectSession(msg.sessions[0].sessionId);
-  updateCost();
-  checkHooks();
+function onInit(m) {
+  S.cfg = m.config || S.cfg;
+  for (const s of m.sessions) S.sessions.set(s.sessionId, { ...s, messages: [], sc: new Map() });
+  if (m.files) S.files = m.files;
+  drawSessions();
+  if (m.sessions.length && !S.activeSid) pickSession(m.sessions[0].sessionId);
+  drawFiles();
+  calcCost();
+  loadHooks();
 }
 
-function onSessionCreated(msg) {
-  if (state.sessions.has(msg.sessionId)) return;
-  state.sessions.set(msg.sessionId, {
-    sessionId: msg.sessionId, projectName: msg.projectName, summary: '',
+function onNewSession(m) {
+  if (S.sessions.has(m.sessionId)) return;
+  S.sessions.set(m.sessionId, {
+    sessionId: m.sessionId, projectName: m.projectName, summary: '',
     lastActivity: new Date(), status: 'running', messageCount: 0,
     tokenUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    modelBreakdown: {}, messages: [], sidechains: new Map()
+    modelBreakdown: {}, messages: [], sc: new Map()
   });
-  renderSessions();
-  if (!state.activeSessionId) selectSession(msg.sessionId);
+  drawSessions();
+  if (!S.activeSid) pickSession(m.sessionId);
 }
 
-function onSessionUpdated(msg) {
-  const s = state.sessions.get(msg.sessionId);
+function onUpdSession(m) {
+  const s = S.sessions.get(m.sessionId);
   if (!s) return;
-  if (msg.detail) Object.assign(s, msg.detail);
-  renderSessions();
-  updateCost();
+  if (m.detail) Object.assign(s, m.detail);
+  drawSessions();
+  calcCost();
 }
 
-function onMessage(msg) {
-  const { sessionId, message } = msg;
-  const s = state.sessions.get(sessionId);
+function onMsg(m) {
+  const s = S.sessions.get(m.sessionId);
   if (!s) return;
-  s.messages.push(message);
+  s.messages.push(m.message);
   s.messageCount = s.messages.length;
-  s.lastActivity = new Date(message.timestamp);
-  if (message.isSidechain) {
-    if (!s.sidechains.has(message.id)) s.sidechains.set(message.id, []);
-    s.sidechains.get(message.id).push(message);
+  s.lastActivity = new Date(m.message.timestamp);
+  if (m.message.isSidechain) {
+    if (!s.sc.has(m.message.id)) s.sc.set(m.message.id, []);
+    s.sc.get(m.message.id).push(m.message);
   }
-  if (sessionId === state.activeSessionId) {
-    appendMsg(message);
-    if (state.autoScroll) scrollBottom();
+  if (m.sessionId === S.activeSid) {
+    appendMsg(m.message);
+    D.mCnt.textContent = s.messages.length;
+    if (S.autoScroll) goBottom();
   }
-  renderSessions();
-  updateCost();
+  drawSessions();
+  calcCost();
 }
 
-function onMessagesBulk(msg) {
-  const s = state.sessions.get(msg.sessionId);
+function onBulk(m) {
+  const s = S.sessions.get(m.sessionId);
   if (!s) return;
-  s.messages = msg.messages || [];
+  s.messages = m.messages || [];
   s.messageCount = s.messages.length;
-  if (msg.sessionId === state.activeSessionId) renderAllMessages();
+  if (m.sessionId === S.activeSid) { drawAllMsgs(); D.mCnt.textContent = s.messages.length; }
 }
 
-// ═══════════ File Panel ═══════════
+// ── Files ──
 
-function onFilesUpdate(files) { state.files = files || []; renderFiles(); }
-
-function onFileChanged(data) {
-  const idx = state.files.findIndex(f => f.filePath === data.filePath);
-  const entry = {
-    filePath: data.filePath, basename: data.filePath.split(/[/\\]/).pop(),
-    status: data.status, timestamp: data.timestamp,
-    isToolWritten: data.isToolWritten || false, toolCall: data.toolCall || null,
-    diff: null, diffSkipped: false, diffSkipReason: ''
-  };
-  if (idx >= 0) state.files[idx] = { ...state.files[idx], ...entry };
-  else state.files.unshift(entry);
-  renderFiles();
+function onFileChg(d) {
+  const i = S.files.findIndex(f => f.filePath === d.filePath);
+  const e = { filePath: d.filePath, basename: d.filePath.split(/[/\\]/).pop(), status: d.status, timestamp: d.timestamp, isToolWritten: d.isToolWritten||false, toolCall: d.toolCall||null, diff: null, diffSkipped: false, diffSkipReason: '' };
+  if (i >= 0) S.files[i] = { ...S.files[i], ...e }; else S.files.unshift(e);
+  drawFiles();
 }
 
-function onFileDiff(data) {
-  const idx = state.files.findIndex(f => f.filePath === data.filePath);
-  if (idx >= 0) {
-    state.files[idx].diff = data.diff;
-    state.files[idx].diffSkipped = data.diffSkipped;
-    state.files[idx].diffSkipReason = data.diffSkipReason;
-  }
-  renderFiles();
+function onFileDiff(d) {
+  const i = S.files.findIndex(f => f.filePath === d.filePath);
+  if (i >= 0) { S.files[i].diff = d.diff; S.files[i].diffSkipped = d.diffSkipped; S.files[i].diffSkipReason = d.diffSkipReason; }
+  drawFiles();
 }
 
-function renderFiles() {
-  dom.fileCount.textContent = state.files.length;
-  if (!state.files.length) {
-    dom.fileItems.innerHTML = '<div style="padding:32px;text-align:center;color:var(--text-muted);font-size:12px">尚无文件改动</div>';
-    return;
-  }
-  dom.fileItems.innerHTML = state.files.map((f, i) => {
-    const icon = f.isToolWritten ? '⚡' : f.status === 'deleted' ? '🗑️' : f.status === 'created' ? '✨' : '📄';
-    const iconClass = f.isToolWritten ? 'tool' : '';
-    const statusClass = f.isToolWritten ? 'tool-written' : f.status;
-    const time = f.timestamp ? fmtTime(new Date(f.timestamp)) : '';
+function drawFiles() {
+  D.fCnt.textContent = S.files.length;
+  if (!S.files.length) { D.fList.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted);font-size:12px">尚无改动</div>'; return; }
+  D.fList.innerHTML = S.files.map((f, i) => {
+    const ico = f.isToolWritten ? '⚡' : f.status === 'deleted' ? '🗑' : f.status === 'created' ? '✨' : '📄';
+    const icoC = f.isToolWritten ? 'tool' : '';
+    const tagC = f.isToolWritten ? 'tool-written' : f.status;
+    const t = f.timestamp ? fmtT(new Date(f.timestamp)) : '';
     const tool = f.toolCall ? ` · ${f.toolCall.toolName}` : '';
-    const diff = f.diffSkipped
-      ? `<div class="diff-skipped">⏭️ ${esc(f.diffSkipReason || '跳过')}</div>`
-      : f.diff ? renderDiff(f.diff) : '<div class="diff-skipped">无 diff</div>';
-    return `<div class="file-card" data-i="${i}">
-      <div class="file-top">
-        <span class="file-icon ${iconClass}">${icon}</span>
-        <span class="file-name" title="${esc(f.filePath)}">${esc(f.basename)}</span>
-        <span class="file-status ${statusClass}">${f.status}</span>
-      </div>
-      <div class="file-meta"><span>${time}</span>${tool ? `<span>${tool}</span>` : ''}</div>
-      <div class="diff-view">${diff}</div>
+    const diff = f.diffSkipped ? `<div class="diff-skip">⏭ ${esc(f.diffSkipReason||'跳过')}</div>` : f.diff ? mkDiff(f.diff) : '<div class="diff-skip">无 diff</div>';
+    return `<div class="file" data-i="${i}">
+      <div class="file-row"><span class="file-icon ${icoC}">${ico}</span><span class="file-name" title="${esc(f.filePath)}">${esc(f.basename)}</span><span class="file-tag ${tagC}">${f.status}</span></div>
+      <div class="file-meta">${t}${tool}</div>
+      <div class="diff">${diff}</div>
     </div>`;
   }).join('');
-  dom.fileItems.querySelectorAll('.file-card').forEach(el =>
-    el.addEventListener('click', () => el.classList.toggle('expanded'))
-  );
+  D.fList.querySelectorAll('.file').forEach(el => el.addEventListener('click', () => el.classList.toggle('open')));
 }
 
-function renderDiff(diff) {
-  if (!diff) return '';
-  const lines = diff.split('\n');
-  let html = '<table class="diff-table">';
-  let lineNum = 0;
-  for (const line of lines) {
-    lineNum++;
-    const escLine = esc(line);
-    if (line.startsWith('@@')) {
-      html += `<tr><td class="diff-line-num"></td><td class="diff-line-code header">${escLine}</td></tr>`;
-    } else if (line.startsWith('+')) {
-      html += `<tr><td class="diff-line-num">${lineNum}</td><td class="diff-line-code add">${escLine}</td></tr>`;
-    } else if (line.startsWith('-')) {
-      html += `<tr><td class="diff-line-num">${lineNum}</td><td class="diff-line-code del">${escLine}</td></tr>`;
-    } else {
-      html += `<tr><td class="diff-line-num">${lineNum}</td><td class="diff-line-code ctx">${escLine}</td></tr>`;
-    }
+function mkDiff(d) {
+  if (!d) return '';
+  let h = '<table class="diff-tbl">', n = 0;
+  for (const l of d.split('\n')) {
+    n++;
+    const e = esc(l);
+    if (l.startsWith('@@')) h += `<tr><td class="diff-ln"></td><td class="diff-c hdr">${e}</td></tr>`;
+    else if (l.startsWith('+')) h += `<tr><td class="diff-ln">${n}</td><td class="diff-c add">${e}</td></tr>`;
+    else if (l.startsWith('-')) h += `<tr><td class="diff-ln">${n}</td><td class="diff-c del">${e}</td></tr>`;
+    else h += `<tr><td class="diff-ln">${n}</td><td class="diff-c ctx">${e}</td></tr>`;
   }
-  html += '</table>';
-  return html;
+  return h + '</table>';
 }
 
-// ═══════════ Hooks ═══════════
+// ── Hooks ──
 
-async function checkHooks() {
-  try {
-    const r = await fetch('/api/hooks/status');
-    const d = await r.json();
-    renderHooks(d);
-  } catch {}
+async function loadHooks() {
+  try { const r = await fetch('/api/hooks/status'); drawHooks(await r.json()); } catch {}
 }
 
-function renderHooks(d) {
-  if (d.hooksInstalled) {
-    dom.hooksStatus.innerHTML = '<span class="hooks-badge ok">✓ Hooks 已安装</span>';
-  } else {
-    dom.hooksStatus.innerHTML = '<span class="hooks-badge missing" id="install-hooks">⚠ 安装 Hooks</span>';
-    document.getElementById('install-hooks')?.addEventListener('click', installHooks);
-  }
+function drawHooks(d) {
+  D.hooksEl.innerHTML = d.hooksInstalled
+    ? '<span class="badge ok">✓ Hooks</span>'
+    : '<span class="badge missing" id="h-btn">⚠ 安装</span>';
+  $('h-btn')?.addEventListener('click', async () => {
+    try { const r = await fetch('/api/hooks/install', { method: 'POST' }); const j = await r.json();
+      if (j.success) { loadHooks(); alert(`已安装\n备份: ${j.backupPath}`); } else alert('失败: ' + (j.error||''));
+    } catch (e) { alert('失败: ' + e.message); }
+  });
 }
 
-async function installHooks() {
-  try {
-    const r = await fetch('/api/hooks/install', { method: 'POST' });
-    const d = await r.json();
-    if (d.success) { checkHooks(); alert(`Hooks 已安装\n备份: ${d.backupPath}`); }
-    else alert('安装失败: ' + (d.error || '未知'));
-  } catch (e) { alert('安装失败: ' + e.message); }
-}
+// ── Sessions ──
 
-// ═══════════ Sessions ═══════════
-
-function renderSessions() {
-  const sorted = [...state.sessions.values()].sort((a, b) =>
-    new Date(b.lastActivity || 0) - new Date(a.lastActivity || 0)
-  );
-  dom.sessionCount.textContent = sorted.length;
-
-  dom.sessionItems.innerHTML = sorted.map(s => {
-    const active = s.sessionId === state.activeSessionId;
-    const status = s.status === 'running' ? 'running' : 'idle';
-    const time = s.lastActivity ? fmtTime(new Date(s.lastActivity)) : '--';
+function drawSessions() {
+  const sorted = [...S.sessions.values()].sort((a, b) => new Date(b.lastActivity||0) - new Date(a.lastActivity||0));
+  D.sCnt.textContent = sorted.length;
+  D.sList.innerHTML = sorted.map(s => {
+    const act = s.sessionId === S.activeSid;
+    const st = s.status === 'running' ? 'on' : 'off';
+    const t = s.lastActivity ? fmtT(new Date(s.lastActivity)) : '--';
     const tu = s.tokenUsage || {};
-    const total = (tu.input || 0) + (tu.output || 0);
-    const tokStr = total > 0 ? fmtTok(total) : '';
-    const msgs = s.messageCount || 0;
-    // 获取主要模型
+    const tok = (tu.input||0) + (tu.output||0);
     const models = Object.keys(s.modelBreakdown || {});
-    const model = models[0] || '';
-    const modelShort = model.replace(/^claude-/, '').replace(/-\d{8}$/, '').slice(0, 12);
-
-    return `<div class="session-item ${active ? 'active' : ''}" data-sid="${s.sessionId}">
-      <div class="session-top">
-        <span class="status-indicator ${status}"></span>
-        <span class="project-name">${esc(s.projectName || 'unknown')}</span>
-        ${modelShort ? `<span class="model-badge">${esc(modelShort)}</span>` : ''}
-      </div>
-      <div class="session-stats">
-        <span class="stat">💬 ${msgs}</span>
-        ${tokStr ? `<span class="stat">🔤 ${tokStr}</span>` : ''}
-        <span class="stat">🕐 ${time}</span>
-      </div>
-      ${s.summary ? `<div class="summary">${esc(s.summary)}</div>` : ''}
+    const mdl = models[0]?.replace(/^claude-/, '').replace(/-\d{8}$/, '').slice(0, 12) || '';
+    return `<div class="session ${act?'active':''}" data-sid="${s.sessionId}">
+      <div class="session-row1"><span class="status ${st}"></span><span class="name">${esc(s.projectName||'')}</span>${mdl?`<span class="model">${esc(mdl)}</span>`:''}</div>
+      <div class="session-row2"><span>💬 ${s.messageCount||0}</span>${tok?`<span>🔤 ${fmtK(tok)}</span>`:''}<span>🕐 ${t}</span></div>
+      ${s.summary?`<div class="summary">${esc(s.summary)}</div>`:''}
     </div>`;
   }).join('');
-
-  dom.sessionItems.querySelectorAll('.session-item').forEach(el =>
-    el.addEventListener('click', () => selectSession(el.dataset.sid))
-  );
+  D.sList.querySelectorAll('.session').forEach(el => el.addEventListener('click', () => pickSession(el.dataset.sid)));
 }
 
-function selectSession(sid) {
-  state.activeSessionId = sid;
-  if (state.ws?.readyState === WebSocket.OPEN)
-    state.ws.send(JSON.stringify({ type: 'getMessages', sessionId: sid }));
-  renderSessions();
-  renderAllMessages();
+function pickSession(sid) {
+  S.activeSid = sid;
+  if (S.ws?.readyState === 1) S.ws.send(JSON.stringify({ type: 'getMessages', sessionId: sid }));
+  drawSessions();
+  drawAllMsgs();
 }
 
-// ═══════════ Messages ═══════════
+// ── Messages ──
 
-function renderAllMessages() {
-  const s = state.sessions.get(state.activeSessionId);
-  dom.messageFlow.innerHTML = '';
-  if (!s?.messages.length) {
-    dom.messageFlow.innerHTML = '<div class="empty-state"><div class="icon">📡</div><div class="title">等待消息...</div><div class="desc">选择一个会话查看消息流</div></div>';
-    return;
+function drawAllMsgs() {
+  const s = S.sessions.get(S.activeSid);
+  D.mFlow.innerHTML = '';
+  if (!s?.messages.length) { D.mFlow.innerHTML = '<div class="empty"><div class="ico">📡</div><div class="ttl">等待消息</div></div>'; D.mCnt.textContent = '0'; return; }
+  const f = document.createDocumentFragment();
+  for (const m of s.messages) { const el = mkMsg(m); if (el) f.appendChild(el); }
+  D.mFlow.appendChild(f);
+  D.mCnt.textContent = s.messages.length;
+  goBottom();
+}
+
+function appendMsg(m) {
+  D.mFlow.querySelector('.empty')?.remove();
+  const el = mkMsg(m); if (el) D.mFlow.appendChild(el);
+}
+
+function mkMsg(m) {
+  if (m.isSidechain) return mkSC(m);
+  const c = document.createElement('div');
+  c.className = `msg ${m.type}`;
+  c.innerHTML = `<div class="msg-head"><span class="msg-tag">${m.type}</span>${m.model?`<span class="msg-model">${esc(m.model)}</span>`:''}<span class="msg-time">${fmtT(new Date(m.timestamp))}</span></div>`;
+  const b = document.createElement('div'); b.className = 'msg-body';
+  for (const bl of m.blocks) {
+    if (bl.type === 'text') { const d = document.createElement('div'); d.textContent = bl.text; b.appendChild(d); }
+    else if (bl.type === 'thinking') b.appendChild(mkThink(bl));
+    else if (bl.type === 'tool_use') b.appendChild(mkTool(bl));
+    else if (bl.type === 'tool_result') b.appendChild(mkRes(bl));
+    else if (bl.type === 'raw') { const pre = document.createElement('pre'); pre.style.cssText='font-size:11px;color:var(--text-muted)'; pre.textContent=JSON.stringify(bl.data,null,2); b.appendChild(pre); }
   }
-  const frag = document.createDocumentFragment();
-  for (const m of s.messages) { const el = createMsgEl(m); if (el) frag.appendChild(el); }
-  dom.messageFlow.appendChild(frag);
-  scrollBottom();
+  c.appendChild(b); return c;
 }
 
-function appendMsg(message) {
-  dom.messageFlow.querySelector('.empty-state')?.remove();
-  const el = createMsgEl(message);
-  if (el) dom.messageFlow.appendChild(el);
-}
-
-function createMsgEl(m) {
-  if (m.isSidechain) return createSidechain(m);
-  const card = document.createElement('div');
-  card.className = `msg ${m.type}`;
-  card.innerHTML = `<div class="msg-header">
-    <span class="msg-role">${m.type}</span>
-    ${m.model ? `<span class="msg-model">${esc(m.model)}</span>` : ''}
-    <span class="msg-time">${fmtTime(new Date(m.timestamp))}</span>
-  </div>`;
-  const body = document.createElement('div');
-  body.className = 'msg-body';
-  for (const b of m.blocks) {
-    if (b.type === 'text') { const d = document.createElement('div'); d.textContent = b.text; body.appendChild(d); }
-    else if (b.type === 'thinking') body.appendChild(createThinking(b));
-    else if (b.type === 'tool_use') body.appendChild(createTool(b));
-    else if (b.type === 'tool_result') body.appendChild(createResult(b));
-    else if (b.type === 'raw') { const pre = document.createElement('pre'); pre.style.cssText = 'font-size:11px;color:var(--text-muted)'; pre.textContent = JSON.stringify(b.data, null, 2); body.appendChild(pre); }
-  }
-  card.appendChild(body);
-  return card;
-}
-
-function createThinking(b) {
-  const el = document.createElement('div');
-  el.className = 'thinking-block';
-  el.innerHTML = `<div class="thinking-header">💭 思考过程 <span style="float:right">▶</span></div>
-    <div class="thinking-body">${esc(b.text)}</div>`;
-  el.querySelector('.thinking-header').addEventListener('click', () => {
-    el.classList.toggle('expanded');
-    el.querySelector('.thinking-header span').textContent = el.classList.contains('expanded') ? '▼' : '▶';
+function mkThink(b) {
+  const el = document.createElement('div'); el.className = 'think';
+  el.innerHTML = `<div class="think-head">💭 思考 <span style="float:right">▶</span></div><div class="think-body">${esc(b.text)}</div>`;
+  el.querySelector('.think-head').addEventListener('click', () => {
+    el.classList.toggle('open');
+    el.querySelector('.think-head span').textContent = el.classList.contains('open') ? '▼' : '▶';
   });
   return el;
 }
 
-function getToolTag(name) {
-  if (['Read'].includes(name)) return 'read';
-  if (['Write', 'Edit', 'MultiEdit'].includes(name)) return 'write';
-  if (['Grep', 'Glob'].includes(name)) return 'search';
-  if (['Bash', 'Agent'].includes(name)) return 'exec';
+function toolTag(n) {
+  if (['Read'].includes(n)) return 'read';
+  if (['Write','Edit','MultiEdit'].includes(n)) return 'write';
+  if (['Grep','Glob'].includes(n)) return 'search';
+  if (['Bash','Agent'].includes(n)) return 'exec';
   return 'other';
 }
 
-function createTool(b) {
-  const tag = getToolTag(b.name);
-  const el = document.createElement('div');
-  el.className = 'tool-card';
-  el.innerHTML = `<div class="tool-header">
-    <span class="tool-tag ${tag}">${b.name}</span>
-    <span class="tool-preview">${esc(b.input || '')}</span>
-    <span class="tool-toggle">▶</span>
-  </div>
-  <div class="tool-body">${esc(b.input || '(no input)')}</div>`;
-  el.querySelector('.tool-header').addEventListener('click', () => {
-    el.classList.toggle('expanded');
-    el.querySelector('.tool-toggle').textContent = el.classList.contains('expanded') ? '▼' : '▶';
+function mkTool(b) {
+  const t = toolTag(b.name);
+  const el = document.createElement('div'); el.className = 'tool';
+  el.innerHTML = `<div class="tool-head"><span class="tool-badge ${t}">${b.name}</span><span class="tool-preview">${esc(b.input||'')}</span><span class="tool-arrow">▶</span></div><div class="tool-body">${esc(b.input||'(no input)')}</div>`;
+  el.querySelector('.tool-head').addEventListener('click', () => {
+    el.classList.toggle('open');
+    el.querySelector('.tool-arrow').textContent = el.classList.contains('open') ? '▼' : '▶';
   });
   return el;
 }
 
-function createResult(b) {
+function mkRes(b) {
   const el = document.createElement('div');
-  el.className = 'tool-result' + (b.is_error ? ' error' : '');
-  el.innerHTML = b.is_error
-    ? `<strong>❌ Error:</strong> ${esc(b.content || '')}`
-    : `<strong>→</strong> ${esc(b.content || '(empty)')}`;
+  el.className = 'tool-result' + (b.is_error ? ' err' : '');
+  el.innerHTML = b.is_error ? `<strong>❌</strong> ${esc(b.content||'')}` : `<strong>→</strong> ${esc(b.content||'(empty)')}`;
   return el;
 }
 
-function createSidechain(m) {
-  const el = document.createElement('div');
-  el.className = 'sidechain';
-  el.innerHTML = `<div class="sidechain-header">🔀 子任务 · ${m.blocks.length} 条消息 <span style="margin-left:auto">▶</span></div>
-    <div class="sidechain-body">${m.blocks.map(b => `<div style="font-size:11px;padding:4px 0;color:var(--text-secondary)">${esc(b.text || JSON.stringify(b))}</div>`).join('')}</div>`;
-  el.querySelector('.sidechain-header').addEventListener('click', () => {
-    el.classList.toggle('expanded');
-    el.querySelector('.sidechain-header span').textContent = el.classList.contains('expanded') ? '▼' : '▶';
+function mkSC(m) {
+  const el = document.createElement('div'); el.className = 'sc';
+  el.innerHTML = `<div class="sc-head">🔀 子任务 · ${m.blocks.length} 条 <span style="float:right">▶</span></div><div class="sc-body">${m.blocks.map(b=>`<div style="font-size:11px;padding:3px 0;color:var(--text-secondary)">${esc(b.text||JSON.stringify(b))}</div>`).join('')}</div>`;
+  el.querySelector('.sc-head').addEventListener('click', () => {
+    el.classList.toggle('open');
+    el.querySelector('.sc-head span').textContent = el.classList.contains('open') ? '▼' : '▶';
   });
   return el;
 }
 
-// ═══════════ Cost ═══════════
+// ── Cost ──
 
-function getModelPricing(model) {
-  if (!model) return null;
-  const p = state.config.pricing || {};
-  const m = model.toLowerCase();
-  if (p[m]) return p[m];
-  for (const k of Object.keys(p).sort((a, b) => b.length - a.length))
-    if (m.startsWith(k.toLowerCase())) return p[k];
+function getMP(m) {
+  if (!m) return null;
+  const p = S.cfg.pricing||{}, ml = m.toLowerCase();
+  if (p[ml]) return p[ml];
+  for (const k of Object.keys(p).sort((a,b)=>b.length-a.length)) if (ml.startsWith(k.toLowerCase())) return p[k];
   return null;
 }
 
-function updateCost() {
-  let ti = 0, to = 0, tr = 0, costUsd = 0, hasUnknown = false;
-  for (const s of state.sessions.values()) {
-    const u = s.tokenUsage || {};
-    ti += u.input || 0; to += u.output || 0; tr += u.cacheRead || 0;
-    if (s.modelBreakdown) {
-      for (const [model, usage] of Object.entries(s.modelBreakdown)) {
-        const p = getModelPricing(model);
-        if (p) costUsd += ((usage.input||0)/1e6)*p.input + ((usage.output||0)/1e6)*p.output + ((usage.cacheRead||0)/1e6)*p.cache_read + ((usage.cacheWrite||0)/1e6)*p.cache_write;
-        else hasUnknown = true;
-      }
+function calcCost() {
+  let ti=0,to=0,tr=0,usd=0,unk=false;
+  for (const s of S.sessions.values()) {
+    const u=s.tokenUsage||{}; ti+=u.input||0; to+=u.output||0; tr+=u.cacheRead||0;
+    if (s.modelBreakdown) for (const [m,u2] of Object.entries(s.modelBreakdown)) {
+      const p=getMP(m);
+      if (p) usd+=((u2.input||0)/1e6)*p.input+((u2.output||0)/1e6)*p.output+((u2.cacheRead||0)/1e6)*p.cache_read+((u2.cacheWrite||0)/1e6)*p.cache_write;
+      else unk=true;
     }
   }
-  dom.costInput.textContent = fmtTok(ti);
-  dom.costOutput.textContent = fmtTok(to);
-  dom.costCacheRead.textContent = fmtTok(tr);
-
-  if (hasUnknown && costUsd === 0) {
-    dom.costTotal.textContent = '未知定价 ⚙️';
-    dom.costCard.className = 'metric-card cost unknown';
-    dom.costCard.onclick = () => showPricingModal();
+  D.mIn.textContent = fmtK(ti); D.mOut.textContent = fmtK(to); D.mCache.textContent = fmtK(tr);
+  if (unk && usd===0) {
+    D.mCost.textContent = '未知定价 ⚙'; D.mCostCard.className = 'metric clickable unknown'; D.mCostCard.onclick = pricingModal;
   } else {
-    const cny = costUsd * state.config.usd_to_cny;
-    dom.costTotal.textContent = `$${costUsd.toFixed(4)} (¥${cny.toFixed(2)})`;
-    dom.costCard.className = `metric-card cost${cny >= state.config.cost_warning_threshold_cny ? ' warning' : ''}`;
-    dom.costCard.onclick = hasUnknown ? () => showPricingModal() : null;
+    const cny = usd * S.cfg.usd_to_cny;
+    D.mCost.textContent = `$${usd.toFixed(4)} (¥${cny.toFixed(2)})`;
+    D.mCostCard.className = `metric clickable${cny>=S.cfg.cost_warning_threshold_cny?' warn':''}`;
+    D.mCostCard.onclick = unk ? pricingModal : null;
   }
 }
 
-function showPricingModal() {
+function pricingModal() {
   const models = new Set();
-  for (const s of state.sessions.values()) if (s.modelBreakdown) Object.keys(s.modelBreakdown).forEach(m => models.add(m));
-  const existing = state.config.pricing || {};
-  const rows = [...models].map(m => {
-    const p = existing[m] || {};
-    return `<tr>
-      <td style="font-weight:600;font-family:'Cascadia Code',monospace">${esc(m)}</td>
-      <td><input data-m="${m}" data-f="input" value="${p.input||''}" placeholder="USD/M"></td>
-      <td><input data-m="${m}" data-f="output" value="${p.output||''}" placeholder="USD/M"></td>
-      <td><input data-m="${m}" data-f="cache_read" value="${p.cache_read||''}" placeholder="USD/M"></td>
-      <td><input data-m="${m}" data-f="cache_write" value="${p.cache_write||''}" placeholder="USD/M"></td>
-    </tr>`;
-  }).join('');
-
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML = `<div class="modal">
-    <h3>⚙️ 设置模型定价</h3>
-    <p style="font-size:12px;color:var(--text-muted);margin-bottom:16px">价格单位：USD / 百万 token</p>
-    <table>
-      <tr><th>模型</th><th>Input</th><th>Output</th><th>Cache-R</th><th>Cache-W</th></tr>
-      ${rows}
-    </table>
-    <div class="modal-btns">
-      <button class="btn btn-cancel" id="p-cancel">取消</button>
-      <button class="btn btn-primary" id="p-save">保存</button>
-    </div>
-  </div>`;
-  document.body.appendChild(overlay);
-  overlay.querySelector('#p-cancel').onclick = () => overlay.remove();
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  overlay.querySelector('#p-save').onclick = () => {
-    for (const inp of overlay.querySelectorAll('input[data-m]')) {
-      const m = inp.dataset.m, f = inp.dataset.f, v = parseFloat(inp.value);
-      if (!state.config.pricing[m]) state.config.pricing[m] = {};
-      if (!isNaN(v)) state.config.pricing[m][f] = v;
-    }
-    overlay.remove();
-    updateCost();
-    fetch('/api/pricing', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state.config.pricing) }).catch(() => {});
+  for (const s of S.sessions.values()) if (s.modelBreakdown) Object.keys(s.modelBreakdown).forEach(m=>models.add(m));
+  const ex = S.cfg.pricing||{};
+  const rows = [...models].map(m=>{ const p=ex[m]||{}; return `<tr><td style="font-weight:600;font-family:monospace">${esc(m)}</td><td><input data-m="${m}" data-f="input" value="${p.input||''}"></td><td><input data-m="${m}" data-f="output" value="${p.output||''}"></td><td><input data-m="${m}" data-f="cache_read" value="${p.cache_read||''}"></td><td><input data-m="${m}" data-f="cache_write" value="${p.cache_write||''}"></td></tr>`; }).join('');
+  const ov = document.createElement('div'); ov.className = 'overlay';
+  ov.innerHTML = `<div class="modal"><h3>⚙ 设置定价</h3><p class="sub">USD / 百万 token</p><table><tr><th>模型</th><th>Input</th><th>Output</th><th>Cache-R</th><th>Cache-W</th></tr>${rows}</table><div class="modal-actions"><button class="btn btn-ghost" id="pc">取消</button><button class="btn btn-primary" id="ps">保存</button></div></div>`;
+  document.body.appendChild(ov);
+  ov.querySelector('#pc').onclick = () => ov.remove();
+  ov.addEventListener('click', e => { if (e.target === ov) ov.remove(); });
+  ov.querySelector('#ps').onclick = () => {
+    for (const inp of ov.querySelectorAll('input[data-m]')) { const m=inp.dataset.m,f=inp.dataset.f,v=parseFloat(inp.value); if(!S.cfg.pricing[m])S.cfg.pricing[m]={}; if(!isNaN(v))S.cfg.pricing[m][f]=v; }
+    ov.remove(); calcCost();
+    fetch('/api/pricing',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(S.cfg.pricing)}).catch(()=>{});
   };
 }
 
-// ═══════════ Scroll ═══════════
+// ── Scroll ──
 
-function scrollBottom() {
-  requestAnimationFrame(() => { dom.messageFlow.scrollTop = dom.messageFlow.scrollHeight; });
-}
-dom.messageFlow.addEventListener('scroll', () => {
-  const { scrollTop, scrollHeight, clientHeight } = dom.messageFlow;
-  state.autoScroll = scrollHeight - scrollTop - clientHeight < 50;
-  dom.messageFlow.classList.toggle('paused', !state.autoScroll);
-});
-dom.messageFlow.addEventListener('click', e => {
-  if (dom.messageFlow.classList.contains('paused') && e.target === dom.messageFlow) {
-    state.autoScroll = true; dom.messageFlow.classList.remove('paused'); scrollBottom();
+function goBottom() { requestAnimationFrame(()=>{ D.mFlow.scrollTop = D.mFlow.scrollHeight; }); }
+D.mFlow.addEventListener('scroll', () => {
+  const {scrollTop,scrollHeight,clientHeight} = D.mFlow;
+  S.autoScroll = scrollHeight-scrollTop-clientHeight < 50;
+  if (!S.autoScroll && !D.mFlow.querySelector('.paused-bar')) {
+    const bar = document.createElement('div'); bar.className = 'paused-bar'; bar.textContent = '⏸ 自动滚动已暂停';
+    bar.onclick = () => { S.autoScroll=true; bar.remove(); goBottom(); };
+    D.mFlow.appendChild(bar);
   }
 });
 
-// ═══════════ Util ═══════════
+// ── Util ──
 
-function fmtTime(d) {
-  if (!d || isNaN(d)) return '--:--';
-  return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
-}
-function fmtTok(n) {
-  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
-  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
-  return n.toString();
-}
-function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function fmtT(d) { return isNaN(d)?'--:--':`${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`; }
+function fmtK(n) { return n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':n.toString(); }
+function esc(s) { if(!s)return''; const d=document.createElement('div');d.textContent=s;return d.innerHTML; }
 
-// ═══════════ Init ═══════════
+// ── Init ──
 
-fetch('/api/pricing').then(r => r.json()).then(p => { state.config.pricing = p; updateCost(); }).catch(() => {});
-connect();
+fetch('/api/pricing').then(r=>r.json()).then(p=>{S.cfg.pricing=p;calcCost();}).catch(()=>{});
+wsConnect();
