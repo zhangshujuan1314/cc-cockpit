@@ -136,6 +136,7 @@ function handleSessionCreated(msg) {
     status: 'running',
     messageCount: 0,
     tokenUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    modelBreakdown: {},
     messages: [],
     sidechains: new Map()
   });
@@ -227,6 +228,11 @@ function renderSessionList() {
     const timeStr = session.lastActivity ? formatTime(new Date(session.lastActivity)) : '--';
     const summary = session.summary || `${session.messageCount || 0} 条消息`;
 
+    // 计算会话 token 总量
+    const tu = session.tokenUsage || {};
+    const totalTokens = (tu.input || 0) + (tu.output || 0);
+    const tokenStr = totalTokens > 0 ? formatTokens(totalTokens) + ' tok' : '';
+
     items.push(`
       <div class="session-item ${isActive ? 'active' : ''}" data-session-id="${session.sessionId}">
         <div class="session-header">
@@ -235,7 +241,7 @@ function renderSessionList() {
         </div>
         <div class="session-meta">
           <span>${timeStr}</span>
-          <span>${session.messageCount || 0} msgs</span>
+          <span>${session.messageCount || 0} msgs${tokenStr ? ' · ' + tokenStr : ''}</span>
         </div>
         <div class="summary">${escapeHtml(summary)}</div>
       </div>
@@ -344,6 +350,18 @@ function createMessageElement(message) {
       const p = document.createElement('div');
       p.textContent = block.text;
       body.appendChild(p);
+    } else if (block.type === 'thinking') {
+      const details = document.createElement('details');
+      details.style.cssText = 'margin:4px 0;font-size:11px;color:var(--text-muted)';
+      const summary = document.createElement('summary');
+      summary.textContent = '💭 思考过程...';
+      summary.style.cssText = 'cursor:pointer;color:var(--text-muted)';
+      const pre = document.createElement('pre');
+      pre.textContent = block.text;
+      pre.style.cssText = 'white-space:pre-wrap;margin:4px 0;padding:6px;background:var(--bg-tertiary);border-radius:3px;font-size:11px';
+      details.appendChild(summary);
+      details.appendChild(pre);
+      body.appendChild(details);
     } else if (block.type === 'tool_use') {
       body.appendChild(createToolCard(block, false));
     } else if (block.type === 'tool_result') {
@@ -402,7 +420,12 @@ function createToolCard(block, isResult) {
 function createToolResult(block) {
   const result = document.createElement('div');
   result.className = 'tool-result';
-  result.innerHTML = `<strong>Result:</strong> ${escapeHtml(block.content || '(empty)')}`;
+  if (block.is_error) {
+    result.style.color = 'var(--danger)';
+    result.innerHTML = `<strong>❌ Error:</strong> ${escapeHtml(block.content || '(empty)')}`;
+  } else {
+    result.innerHTML = `<strong>Result:</strong> ${escapeHtml(block.content || '(empty)')}`;
+  }
   return result;
 }
 
@@ -434,8 +457,29 @@ function createSidechainElement(message) {
 
 // ============= 成本计算 =============
 
+/**
+ * 按模型名前缀匹配定价表
+ */
+function getModelPricing(model) {
+  if (!model) return null;
+  const pricing = state.config.pricing || {};
+  const modelLower = model.toLowerCase();
+
+  // 精确匹配
+  if (pricing[modelLower]) return pricing[modelLower];
+
+  // 前缀匹配（最长匹配优先）
+  const keys = Object.keys(pricing).sort((a, b) => b.length - a.length);
+  for (const key of keys) {
+    if (modelLower.startsWith(key.toLowerCase())) return pricing[key];
+  }
+  return null;
+}
+
 function updateCostBar() {
   let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheWrite = 0;
+  let totalCostUsd = 0;
+  let hasUnknown = false;
 
   for (const session of state.sessions.values()) {
     if (session.tokenUsage) {
@@ -444,37 +488,46 @@ function updateCostBar() {
       totalCacheRead += session.tokenUsage.cacheRead || 0;
       totalCacheWrite += session.tokenUsage.cacheWrite || 0;
     }
+
+    // 按模型细分计算
+    if (session.modelBreakdown) {
+      for (const [model, usage] of Object.entries(session.modelBreakdown)) {
+        const p = getModelPricing(model);
+        if (p) {
+          totalCostUsd += ((usage.input || 0) / 1e6) * p.input +
+                          ((usage.output || 0) / 1e6) * p.output +
+                          ((usage.cacheRead || 0) / 1e6) * p.cache_read +
+                          ((usage.cacheWrite || 0) / 1e6) * p.cache_write;
+        } else {
+          hasUnknown = true;
+        }
+      }
+    }
   }
+
+  // 无模型细分时用默认估价
+  if (totalCostUsd === 0 && (totalInput + totalOutput) > 0) {
+    const p = state.config.pricing?.['claude-sonnet-4'] || { input: 3, output: 15, cache_write: 3.75, cache_read: 0.3 };
+    totalCostUsd = (totalInput / 1e6) * p.input + (totalOutput / 1e6) * p.output +
+                   (totalCacheRead / 1e6) * p.cache_read + (totalCacheWrite / 1e6) * p.cache_write;
+    hasUnknown = true; // 默认估价不精确
+  }
+
+  const totalCostCny = totalCostUsd * state.config.usd_to_cny;
 
   dom.costInput.textContent = formatTokens(totalInput);
   dom.costOutput.textContent = formatTokens(totalOutput);
   dom.costCacheRead.textContent = formatTokens(totalCacheRead);
   dom.costCacheWrite.textContent = formatTokens(totalCacheWrite);
 
-  // 计算费用（需要知道模型，这里简化处理）
-  const costUsd = estimateCost(totalInput, totalOutput, totalCacheRead, totalCacheWrite);
-  const costCny = costUsd * state.config.usd_to_cny;
+  const unknownTag = hasUnknown ? ' ⚠️' : '';
+  dom.costTotal.textContent = `$${totalCostUsd.toFixed(4)} (¥${totalCostCny.toFixed(2)})${unknownTag}`;
 
-  dom.costTotal.textContent = `$${costUsd.toFixed(4)} (¥${costCny.toFixed(2)})`;
-
-  // 超阈值警告
-  if (costCny >= state.config.cost_warning_threshold_cny) {
+  if (totalCostCny >= state.config.cost_warning_threshold_cny) {
     dom.costTotal.classList.add('warning');
   } else {
     dom.costTotal.classList.remove('warning');
   }
-}
-
-function estimateCost(input, output, cacheRead, cacheWrite) {
-  // 使用 sonnet 价格作为默认估算
-  const pricing = state.config.pricing['claude-sonnet-4'] || { input: 3, output: 15, cache_write: 3.75, cache_read: 0.3 };
-
-  const cost = (input / 1_000_000) * pricing.input +
-               (output / 1_000_000) * pricing.output +
-               (cacheRead / 1_000_000) * pricing.cache_read +
-               (cacheWrite / 1_000_000) * pricing.cache_write;
-
-  return cost;
 }
 
 // ============= 自动滚动 =============

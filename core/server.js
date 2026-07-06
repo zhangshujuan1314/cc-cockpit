@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { WebSocketServer } from 'ws';
 import { Tailer } from './tailer.js';
 import { SessionManager } from './sessions.js';
+import { CostCalculator } from './cost.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -134,6 +135,31 @@ async function main() {
     if (req.url === '/api/config' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(config));
+      return;
+    }
+
+    // 成本汇总 API
+    if (req.url === '/api/cost' && req.method === 'GET') {
+      const sessions = sessionManager.getSessionList();
+      const costCalc = new CostCalculator(config);
+      let totalTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+      let totalCost = { usd: 0, cny: 0 };
+      let hasUnknown = false;
+
+      for (const s of sessions) {
+        totalTokens.input += s.tokenUsage.input;
+        totalTokens.output += s.tokenUsage.output;
+        totalTokens.cacheRead += s.tokenUsage.cacheRead;
+        totalTokens.cacheWrite += s.tokenUsage.cacheWrite;
+
+        const cost = costCalc.calculateSession(s.tokenUsage, s.modelBreakdown);
+        totalCost.usd += cost.usd;
+        totalCost.cny += cost.cny;
+        if (cost.hasUnknown) hasUnknown = true;
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ tokens: totalTokens, cost: totalCost, hasUnknown }));
       return;
     }
 

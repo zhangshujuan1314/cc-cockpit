@@ -53,7 +53,8 @@ export class SessionManager extends EventEmitter {
         output: 0,
         cacheRead: 0,
         cacheWrite: 0
-      }
+      },
+      modelBreakdown: {} // { model: { input, output, cacheRead, cacheWrite } }
     });
 
     this.emit('session:created', { sessionId, projectName });
@@ -84,6 +85,18 @@ export class SessionManager extends EventEmitter {
       session.tokenUsage.output += u.output_tokens || 0;
       session.tokenUsage.cacheRead += u.cache_read_input_tokens || 0;
       session.tokenUsage.cacheWrite += u.cache_creation_input_tokens || 0;
+
+      // 按模型细分
+      const model = data.message?.model;
+      if (model) {
+        if (!session.modelBreakdown[model]) {
+          session.modelBreakdown[model] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+        }
+        session.modelBreakdown[model].input += u.input_tokens || 0;
+        session.modelBreakdown[model].output += u.output_tokens || 0;
+        session.modelBreakdown[model].cacheRead += u.cache_read_input_tokens || 0;
+        session.modelBreakdown[model].cacheWrite += u.cache_creation_input_tokens || 0;
+      }
     }
 
     // 处理 summary（会话摘要）
@@ -278,7 +291,8 @@ export class SessionManager extends EventEmitter {
         lastActivity: session.lastActivity,
         status: session.status,
         messageCount: session.messages.length,
-        tokenUsage: session.tokenUsage
+        tokenUsage: session.tokenUsage,
+        modelBreakdown: session.modelBreakdown
       });
     }
     // 按最后活跃时间排序
@@ -314,6 +328,7 @@ export class SessionManager extends EventEmitter {
       cwd: session.cwd,
       gitBranch: session.gitBranch,
       tokenUsage: session.tokenUsage,
+      modelBreakdown: session.modelBreakdown,
       messageCount: session.messages.length
     };
   }
