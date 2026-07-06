@@ -1,0 +1,8 @@
+{
+  "test-model-xyz": {
+    "input": 99,
+    "output": 88,
+    "cache_read": 77,
+    "cache_write": 66
+  }
+}

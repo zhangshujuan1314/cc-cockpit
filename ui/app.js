@@ -494,8 +494,12 @@ function showPricingModal() {
     }
     overlay.remove();
     updateCostBar();
-    // 保存到 localStorage
-    try { localStorage.setItem('cc-cockpit-pricing', JSON.stringify(state.config.pricing)); } catch {}
+    // 保存到后端 pricing.json
+    fetch('/api/pricing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(state.config.pricing)
+    }).catch(err => console.warn('[pricing] 保存失败:', err));
   };
 }
 
@@ -539,10 +543,10 @@ function escapeHtml(s) {
 
 // ═══════════ 启动 ═══════════
 
-// 恢复 localStorage 中的定价
-try {
-  const saved = localStorage.getItem('cc-cockpit-pricing');
-  if (saved) state.config.pricing = JSON.parse(saved);
-} catch {}
+// 从后端加载定价
+fetch('/api/pricing').then(r => r.json()).then(p => {
+  state.config.pricing = p;
+  updateCostBar();
+}).catch(() => {});
 
 connectWebSocket();

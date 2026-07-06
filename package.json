@@ -1,20 +1,46 @@
 {
   "name": "cc-cockpit",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "type": "module",
-  "description": "Claude Code 实时监控驾驶舱",
-  "main": "shell/main.js",
+  "description": "Claude Code 实时监控驾驶舱 — Windows也能用的CC监控面板",
+  "main": "core/server.js",
+  "bin": {
+    "cc-cockpit": "./bin.js"
+  },
+  "files": [
+    "core/",
+    "ui/",
+    "shell/",
+    "hook-ping.js",
+    "bin.js",
+    "pricing.json",
+    "config.example.json",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "start": "node bin.js",
     "web": "node core/server.js",
-    "start": "electron shell/main.js",
+    "electron": "electron shell/main.js",
     "install-shell": "npm install electron --legacy-peer-deps"
   },
+  "keywords": [
+    "claude-code",
+    "monitoring",
+    "dashboard",
+    "token-usage",
+    "websocket"
+  ],
   "dependencies": {
     "ws": "^8.18.0",
     "chokidar": "^4.0.0"
   },
   "optionalDependencies": {
     "electron": "^33.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhangshujuan1314/cc-cockpit.git"
   },
   "license": "MIT"
 }
