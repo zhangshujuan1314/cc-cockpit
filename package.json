@@ -22,7 +22,9 @@
     "start": "node bin.js",
     "web": "node core/server.js",
     "electron": "electron shell/main.js",
-    "install-shell": "npm install electron --legacy-peer-deps"
+    "install-shell": "npm install electron --legacy-peer-deps",
+    "test": "node test-adversarial.js && node test-m3-m4.js",
+    "test:lan": "node test-lan-rejection.js"
   },
   "keywords": [
     "claude-code",

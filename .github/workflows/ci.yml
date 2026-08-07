@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  windows-web:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install locked web dependencies
+        run: npm ci --omit=optional
+
+      - name: Run adversarial core suites
+        run: npm test
+
+      - name: Verify npm package contents
+        run: npm pack --dry-run
+
+      - name: Start localhost dashboard
+        shell: pwsh
+        run: |
+          $proc = Start-Process node -ArgumentList 'core/server.js' -PassThru
+          $proc.Id | Out-File -FilePath server.pid -Encoding ascii
+          for ($i = 0; $i -lt 30; $i++) {
+            try {
+              $response = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3777/api/sessions -TimeoutSec 2
+              if ($response.StatusCode -eq 200) { exit 0 }
+            } catch {}
+            Start-Sleep -Seconds 1
+          }
+          throw 'CC Cockpit did not become ready on 127.0.0.1:3777'
+
+      - name: Verify LAN rejection
+        run: npm run test:lan
+
+      - name: Stop dashboard
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path server.pid) {
+            $pidToStop = Get-Content server.pid
+            Stop-Process -Id $pidToStop -Force -ErrorAction SilentlyContinue
+          }
