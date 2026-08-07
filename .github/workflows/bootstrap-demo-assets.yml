@@ -38,17 +38,24 @@ jobs:
           done
           cat /tmp/cc-cockpit.log
           exit 1
-      - name: Install capture browser
+      - name: Install isolated capture browser
         run: |
-          npm install --no-save --package-lock=false playwright@1.55.0
+          mkdir -p /tmp/capture-tool
+          cd /tmp/capture-tool
+          npm init -y >/dev/null
+          npm install playwright@1.55.0
           npx playwright install --with-deps chromium
       - name: Capture real UI from sanitized demo data
         run: |
           mkdir -p docs/assets
-          cat > /tmp/capture.mjs <<'NODE'
+          cat > /tmp/capture-tool/capture.mjs <<'NODE'
           import { chromium } from 'playwright';
           import fs from 'fs';
+          import path from 'path';
 
+          const root = process.env.GITHUB_WORKSPACE;
+          const out = path.join(root, 'docs', 'assets');
+          const asset = name => path.join(out, name);
           const browser = await chromium.launch({headless:true});
           const context = await browser.newContext({
             viewport: { width: 1440, height: 900 },
@@ -60,46 +67,49 @@ jobs:
           await page.locator('.session').first().click();
           await page.locator('.msg').first().waitFor({state:'visible'});
           await page.waitForTimeout(700);
-          await page.screenshot({path:'docs/assets/cc-cockpit-overview.png'});
+          await page.screenshot({path:asset('cc-cockpit-overview.png')});
 
           const tool = page.locator('.tool').first();
           await tool.scrollIntoViewIfNeeded();
           await tool.click();
           await page.waitForTimeout(350);
-          await page.screenshot({path:'docs/assets/cc-cockpit-tool-call.png'});
+          await page.screenshot({path:asset('cc-cockpit-tool-call.png')});
 
           const file = page.locator('.file').first();
+          await file.waitFor({state:'visible'});
           await file.scrollIntoViewIfNeeded();
           await file.click();
           await page.waitForTimeout(350);
-          await page.screenshot({path:'docs/assets/cc-cockpit-file-panel.png'});
+          await page.screenshot({path:asset('cc-cockpit-file-panel.png')});
 
           await page.locator('#m-cost-card').click();
           await page.locator('.modal').waitFor({state:'visible'});
           await page.waitForTimeout(350);
-          await page.screenshot({path:'docs/assets/cc-cockpit-cost-settings.png'});
+          await page.screenshot({path:asset('cc-cockpit-cost-settings.png')});
 
           await page.locator('#pc').click();
           await page.waitForTimeout(500);
           const video = page.video();
           await page.close();
-          await video.saveAs('docs/assets/cc-cockpit-demo.webm');
+          await video.saveAs(asset('cc-cockpit-demo.webm'));
           await context.close();
           await browser.close();
 
-          for (const p of [
-            'docs/assets/cc-cockpit-overview.png',
-            'docs/assets/cc-cockpit-tool-call.png',
-            'docs/assets/cc-cockpit-file-panel.png',
-            'docs/assets/cc-cockpit-cost-settings.png',
-            'docs/assets/cc-cockpit-demo.webm'
+          for (const name of [
+            'cc-cockpit-overview.png',
+            'cc-cockpit-tool-call.png',
+            'cc-cockpit-file-panel.png',
+            'cc-cockpit-cost-settings.png',
+            'cc-cockpit-demo.webm'
           ]) {
+            const p = asset(name);
             if (!fs.existsSync(p) || fs.statSync(p).size === 0) throw new Error(`missing asset: ${p}`);
-            console.log(`${p}: ${fs.statSync(p).size} bytes`);
+            console.log(`${name}: ${fs.statSync(p).size} bytes`);
           }
           NODE
-          node /tmp/capture.mjs
-      - name: Verify assets contain no private source strings
+          cd /tmp/capture-tool
+          GITHUB_WORKSPACE="$GITHUB_WORKSPACE" node capture.mjs
+      - name: Verify publication fixture is sanitized
         run: |
           test -s docs/assets/cc-cockpit-overview.png
           test -s docs/assets/cc-cockpit-tool-call.png
@@ -107,7 +117,10 @@ jobs:
           test -s docs/assets/cc-cockpit-cost-settings.png
           test -s docs/assets/cc-cockpit-demo.webm
           grep -q 'demo-session' demo/sanitized-session.jsonl
-          ! grep -R "zhangshujuan1314" demo docs/assets --include='*.jsonl' --include='*.md' || false
+          if grep -Eqi 'zhangshujuan1314|api[_-]?key|sk-[A-Za-z0-9]' demo/sanitized-session.jsonl; then
+            echo 'Private-looking material found in demo fixture.' >&2
+            exit 1
+          fi
       - name: Commit generated publication assets
         run: |
           git config user.name 'github-actions[bot]'
