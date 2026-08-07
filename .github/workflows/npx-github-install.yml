@@ -1,0 +1,50 @@
+name: npx GitHub Install
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  clean-npx-install:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Start package from GitHub in an empty directory
+        shell: pwsh
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP 'cc-cockpit-npx-clean'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $proc = Start-Process -FilePath 'npx.cmd' -ArgumentList '--yes','github:zhangshujuan1314/cc-cockpit' -WorkingDirectory $work -PassThru
+          $proc.Id | Out-File -FilePath (Join-Path $env:RUNNER_TEMP 'npx.pid') -Encoding ascii
+
+          for ($i = 0; $i -lt 45; $i++) {
+            if ($proc.HasExited) {
+              throw "npx process exited before the dashboard became ready (exit code $($proc.ExitCode))"
+            }
+            try {
+              $response = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3777/api/sessions -TimeoutSec 2
+              if ($response.StatusCode -eq 200) {
+                Write-Host 'Remote GitHub package started successfully from an empty directory.'
+                exit 0
+              }
+            } catch {}
+            Start-Sleep -Seconds 1
+          }
+          throw 'Remote GitHub package did not become ready on 127.0.0.1:3777'
+
+      - name: Stop remote package process tree
+        if: always()
+        shell: pwsh
+        run: |
+          $pidFile = Join-Path $env:RUNNER_TEMP 'npx.pid'
+          if (Test-Path $pidFile) {
+            $pidToStop = (Get-Content $pidFile).Trim()
+            if ($pidToStop) {
+              & taskkill.exe /PID $pidToStop /T /F 2>$null
+            }
+          }
